@@ -9,80 +9,123 @@ jobs:
   frontend-build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout repository
+      - name: 检查代码
         uses: actions/checkout@v6.0.1
         with:
           submodules: recursive
-      - name: Set up Node.js
+      
+      - name: 调试：查看目录结构
+        run: |
+          echo "当前目录结构："
+          ls -la
+          echo ""
+          echo "查找 frontend 目录："
+          find . -type d -name "*frontend*" -o -name "*Frontend*" | head -20
+      
+      - name: 设置 Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 20
-      - name: Install dependencies and build frontend
+      
+      - name: 安装依赖并构建前端
         run: |
-          cd frontend
-          npm install
-          npm run build
-      - name: Upload frontend build artifact
+          # 先检查 frontend 目录是否存在
+          if [ -d "frontend" ]; then
+            echo "找到 frontend 目录"
+            cd frontend
+            npm install
+            npm run build
+          elif [ -d "Frontend" ]; then
+            echo "找到 Frontend 目录（首字母大写）"
+            cd Frontend
+            npm install
+            npm run build
+          else
+            echo "错误：找不到前端目录"
+            echo "当前目录内容："
+            ls -la
+            exit 1
+          fi
+      
+      - name: 上传前端构建产物
         uses: actions/upload-artifact@v5
         with:
           name: frontend-dist
-          path: frontend/dist/
+          # 根据实际情况调整路径
+          path: |
+            frontend/dist/
+            Frontend/dist/
 
   build:
     needs: frontend-build
     runs-on: ubuntu-22.04
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v6.0.1
-    - name: Download frontend build artifact
-      uses: actions/download-artifact@v6
-      with:
-        name: frontend-dist
-        path: frontend_dist
-    - name: Docker meta
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: |
-          alireza7/s-ui
-          ghcr.io/alireza0/s-ui
-        tags: |
-          type=ref,event=branch
-          type=ref,event=tag
-          type=pep440,pattern={{version}}
-    - name: Set up QEMU
-      uses: docker/setup-qemu-action@v3
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      with:
-        install: true
-        buildkitd-flags: --debug
-    - name: Cache Docker layers
-      uses: actions/cache@v4
-      with:
-        path: /tmp/.buildx-cache
-        key: ${{ runner.os }}-buildx-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-buildx-
-    - name: Login to Docker Hub
-      uses: docker/login-action@v3
-      with:
-        username: ${{ secrets.DOCKER_HUB_USERNAME }}
-        password: ${{ secrets.DOCKER_HUB_TOKEN }}
-    - name: Login to GHCR
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.repository_owner }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-    - name: Build and push
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: Dockerfile.frontend-artifact
-        push: true
-        platforms: linux/amd64, linux/386, linux/arm64/v8, linux/arm/v7, linux/arm/v6
-        tags: ${{ steps.meta.outputs.tags }}
-        labels: ${{ steps.meta.outputs.labels }}
-        cache-from: type=local,src=/tmp/.buildx-cache
-        cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
+      - name: 检查代码
+        uses: actions/checkout@v6.0.1
+      
+      - name: 下载前端构建产物
+        uses: actions/download-artifact@v6
+        with:
+          name: frontend-dist
+          # 直接下载到 frontend/dist 目录
+          path: frontend/dist
+      
+      - name: 验证前端构建文件
+        run: |
+          echo "检查 frontend/dist 目录："
+          ls -la frontend/dist/ || echo "frontend/dist 不存在，尝试创建..."
+          mkdir -p frontend/dist
+      
+      - name: Docker 元数据
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            alireza7/s-ui
+            ghcr.io/alireza0/s-ui
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=pep440,pattern={{version}}
+      
+      - name: 设置 QEMU
+        uses: docker/setup-qemu-action@v3
+      
+      - name: 设置 Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          install: true
+          buildkitd-flags: --debug
+      
+      - name: 缓存 Docker 层
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-
+      
+      - name: 登录 Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_TOKEN }}
+      
+      - name: 登录 GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: 构建并推送
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.frontend-artifact
+          push: true
+          platforms: linux/amd64, linux/386, linux/arm64/v8, linux/arm/v7, linux/arm/v6
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache,mode=max
