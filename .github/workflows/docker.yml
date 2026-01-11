@@ -9,74 +9,148 @@ jobs:
   frontend-build:
     runs-on: ubuntu-22.04
     steps:
-      - name: 检查代码
+      - name: Checkout repository
         uses: actions/checkout@v6.0.1
         with:
           submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: 调试：查看目录结构
-        run: |
-          echo "当前目录结构："
-          ls -la
-          echo ""
-          echo "查找 frontend 目录："
-          find . -type d -name "*frontend*" -o -name "*Frontend*" | head -20
-      
-      - name: 设置 Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
           node-version: 20
       
-      - name: 安装依赖并构建前端
+      - name: Install dependencies and build frontend
         run: |
-          # 先检查 frontend 目录是否存在
+          # 检查 frontend 目录是否存在
           if [ -d "frontend" ]; then
-            echo "找到 frontend 目录"
+            echo "Building frontend..."
             cd frontend
             npm install
             npm run build
-          elif [ -d "Frontend" ]; then
-            echo "找到 Frontend 目录（首字母大写）"
-            cd Frontend
-            npm install
-            npm run build
           else
-            echo "错误：找不到前端目录"
-            echo "当前目录内容："
+            echo "Error: frontend directory not found!"
+            echo "Current directory contents:"
             ls -la
             exit 1
           fi
       
-      - name: 上传前端构建产物
+      - name: Prepare web/html directory
+        run: |
+          # 创建 web/html 目录并复制前端构建文件
+          mkdir -p web/html
+          rm -fr web/html/*
+          cp -R frontend/dist/* web/html/
+          echo "Frontend files copied to web/html/"
+          ls -la web/html/
+      
+      - name: Upload web/html build artifact
         uses: actions/upload-artifact@v5
         with:
-          name: frontend-dist
-          # 根据实际情况调整路径
-          path: |
-            frontend/dist/
-            Frontend/dist/
+          name: web-html-dist
+          path: web/html/
 
-  build:
+  backend-build:
     needs: frontend-build
     runs-on: ubuntu-22.04
     steps:
-      - name: 检查代码
+      - name: Checkout repository
         uses: actions/checkout@v6.0.1
+        with:
+          submodules: recursive
       
-      - name: 下载前端构建产物
+      - name: Download web/html artifact
         uses: actions/download-artifact@v6
         with:
-          name: frontend-dist
-          # 直接下载到 frontend/dist 目录
-          path: frontend/dist
+          name: web-html-dist
+          path: web/html/
       
-      - name: 验证前端构建文件
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.1'
+      
+      - name: Build Go binary
         run: |
-          echo "检查 frontend/dist 目录："
-          ls -la frontend/dist/ || echo "frontend/dist 不存在，尝试创建..."
-          mkdir -p frontend/dist
+          echo "Building Go binary..."
+          go build -ldflags "-w -s" -tags "with_quic,with_grpc,with_utls,with_acme,with_gvisor" -o sui main.go
+          chmod +x sui
+          ls -lh sui
       
-      - name: Docker 元数据
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: sui-binary
+          path: sui
+
+  docker-build:
+    needs: backend-build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6.0.1
+      
+      - name: Download binary artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: sui-binary
+      
+      - name: Download web/html artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: web-html-dist
+          path: web/html/
+      
+      - name: Prepare Docker context
+        run: |
+          # 创建必要的目录结构
+          mkdir -p docker-context
+          cp sui docker-context/
+          cp -r web docker-context/
+          cp entrypoint.sh docker-context/
+          chmod +x docker-context/entrypoint.sh
+          
+          # 复制其他必要的文件
+          cp go.mod docker-context/
+          cp main.go docker-context/
+          
+          # 创建 Dockerfile
+          cat > docker-context/Dockerfile << 'EOF'
+FROM alpine:latest
+
+WORKDIR /app
+
+# 安装必要的依赖
+RUN apk add --no-cache tzdata ca-certificates && \
+    update-ca-certificates
+
+# 复制应用文件
+COPY sui /app/
+COPY entrypoint.sh /app/
+COPY web /app/web/
+
+# 设置权限
+RUN chmod +x /app/sui /app/entrypoint.sh
+
+# 创建必要的目录
+RUN mkdir -p /app/db /app/cert /app/bin
+
+# 设置环境变量
+ENV TZ=Asia/Shanghai
+ENV SUI_DB_FOLDER=/app/db
+ENV SUI_BIN_FOLDER=/app/bin
+
+# 暴露端口
+EXPOSE 2095 2096 80 443
+
+# 设置入口点
+ENTRYPOINT ["./entrypoint.sh"]
+EOF
+          
+          echo "Docker context prepared:"
+          ls -la docker-context/
+      
+      - name: Docker meta
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -87,17 +161,19 @@ jobs:
             type=ref,event=branch
             type=ref,event=tag
             type=pep440,pattern={{version}}
+          flavor: |
+            latest=false
       
-      - name: 设置 QEMU
+      - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
       
-      - name: 设置 Docker Buildx
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
           install: true
           buildkitd-flags: --debug
       
-      - name: 缓存 Docker 层
+      - name: Cache Docker layers
         uses: actions/cache@v4
         with:
           path: /tmp/.buildx-cache
@@ -105,26 +181,27 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-buildx-
       
-      - name: 登录 Docker Hub
+      - name: Login to Docker Hub
+        if: success()
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_TOKEN }}
       
-      - name: 登录 GHCR
+      - name: Login to GHCR
+        if: success()
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: 构建并推送
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: Dockerfile.frontend-artifact
-          push: true
+          context: docker-context
           platforms: linux/amd64, linux/386, linux/arm64/v8, linux/arm/v7, linux/arm/v6
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=local,src=/tmp/.buildx-cache
